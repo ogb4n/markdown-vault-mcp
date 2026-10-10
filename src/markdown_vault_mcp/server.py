@@ -16,9 +16,9 @@ from . import tools
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("mcp-markdown-repositories")
+logger = logging.getLogger("markdown-vault-mcp")
 
-app = Server("mcp-markdown-repositories")
+app = Server("markdown-vault-mcp")
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:

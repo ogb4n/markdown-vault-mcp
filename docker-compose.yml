@@ -1,9 +1,9 @@
 services:
-  markdown-repositories:
+  markdown-vault-mcp:
     build: .
-    image: mcp-markdown-repositories:latest
+    image: markdown-vault-mcp:latest
     restart: unless-stopped
-    entrypoint: ["mcp-markdown-repositories-http"]
+    entrypoint: ["markdown-vault-mcp-http"]
     # The container writes into the vault: it must run as the user that owns it,
     # otherwise every write is refused (or leaves root-owned files behind).
     user: "${VAULT_UID_GID:-1000:1000}"

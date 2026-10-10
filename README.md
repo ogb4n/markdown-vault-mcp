@@ -1,4 +1,4 @@
-# MCP Markdown Repositories
+# Markdown Vault MCP
 
 An MCP server that reads and writes the Markdown files of a local directory the
 way the Obsidian MCP does, without Obsidian running. Point it at a vault that is
@@ -70,7 +70,7 @@ A remote MCP client needs:
 }
 ```
 
-For a local stdio client, install the package and run `mcp-markdown-repositories`
+For a local stdio client, install the package and run `markdown-vault-mcp`
 with `MARKDOWN_REPOSITORIES='{"vault":"/path/to/vault"}'`. Several repositories
 can be named in that JSON object; `MARKDOWN_DEFAULT_REPOSITORY` picks the one
 used when a call omits `repository`.

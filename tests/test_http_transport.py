@@ -3,7 +3,7 @@
 import pytest
 from starlette.testclient import TestClient
 
-from mcp_markdown_repositories.http_server import DEFAULT_PORT, HEALTH_PATH, MCP_PATH, build_app
+from markdown_vault_mcp.http_server import DEFAULT_PORT, HEALTH_PATH, MCP_PATH, build_app
 
 TOKEN = "jeton-de-test"
 

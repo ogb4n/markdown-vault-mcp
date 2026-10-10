@@ -25,7 +25,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .server import app as mcp_server
 
-logger = logging.getLogger("mcp-markdown-repositories.http")
+logger = logging.getLogger("markdown-vault-mcp.http")
 
 DEFAULT_PORT = 27125
 MCP_PATH = "/mcp"
@@ -119,7 +119,7 @@ def build_app(
 
 
 def main_http() -> None:
-    """Entry point of the `mcp-markdown-repositories-http` script."""
+    """Entry point of the `markdown-vault-mcp-http` script."""
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 
     token = os.getenv("MCP_HTTP_TOKEN")

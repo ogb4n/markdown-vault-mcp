@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from mcp_markdown_repositories.repository import (
+from markdown_vault_mcp.repository import (
     LocalMarkdownRepository,
     RepositoryConflictError,
     RepositoryNotFoundError,
@@ -54,7 +54,7 @@ def test_frontmatter_and_tags_are_extracted_without_obsidian():
 
 
 def test_paths_cannot_escape_a_repository():
-    from mcp_markdown_repositories.repository import _normalise_path
+    from markdown_vault_mcp.repository import _normalise_path
 
     with pytest.raises(RepositoryPathError):
         _normalise_path("../outside.md")

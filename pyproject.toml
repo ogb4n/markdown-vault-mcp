@@ -1,5 +1,5 @@
 [project]
-name = "mcp-markdown-repositories"
+name = "markdown-vault-mcp"
 version = "0.3.0"
 description = "MCP server for local Markdown repositories"
 readme = "README.md"
@@ -18,7 +18,7 @@ requires = [ "hatchling",]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mcp_markdown_repositories"]
+packages = ["src/markdown_vault_mcp"]
 
 [dependency-groups]
 dev = [
@@ -32,5 +32,5 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 
 [project.scripts]
-mcp-markdown-repositories = "mcp_markdown_repositories:main"
-mcp-markdown-repositories-http = "mcp_markdown_repositories.http_server:main_http"
+markdown-vault-mcp = "markdown_vault_mcp:main"
+markdown-vault-mcp-http = "markdown_vault_mcp.http_server:main_http"

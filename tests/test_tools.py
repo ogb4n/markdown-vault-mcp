@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from mcp_markdown_repositories import tools
-from mcp_markdown_repositories.repository import RepositoryError
+from markdown_vault_mcp import tools
+from markdown_vault_mcp.repository import RepositoryError
 
 
 class Repository:

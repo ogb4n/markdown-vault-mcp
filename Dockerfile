@@ -34,4 +34,4 @@ COPY --from=builder --chown=app:app /app/src /app/src
 
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 USER app
-ENTRYPOINT ["mcp-markdown-repositories"]
+ENTRYPOINT ["markdown-vault-mcp"]
