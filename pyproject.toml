@@ -1,12 +1,11 @@
 [project]
 name = "mcp-markdown-repositories"
 version = "0.3.0"
-description = "MCP server for OneDrive-backed Markdown repositories"
+description = "MCP server for local Markdown repositories"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
  "mcp>=1.1.0,<2.0.0",
- "requests>=2.32.3",
  "starlette>=0.41.0",
  "uvicorn>=0.32.0",
 ]
@@ -35,4 +34,3 @@ testpaths = ["tests"]
 [project.scripts]
 mcp-markdown-repositories = "mcp_markdown_repositories:main"
 mcp-markdown-repositories-http = "mcp_markdown_repositories.http_server:main_http"
-mcp-markdown-repositories-auth = "mcp_markdown_repositories.auth:main"

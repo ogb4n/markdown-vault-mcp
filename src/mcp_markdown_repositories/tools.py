@@ -1,4 +1,4 @@
-"""MCP boundary for OneDrive-backed Markdown repositories."""
+"""MCP boundary for local Markdown repositories."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any
 
 from mcp.types import EmbeddedResource, ImageContent, TextContent, Tool
 
-from .repository import GraphClient, GraphMarkdownRepository, OneDriveTokenProvider, RepositoryError
+from .repository import LocalMarkdownRepository, RepositoryError
 
 
 ToolResult = Sequence[TextContent | ImageContent | EmbeddedResource]
@@ -21,9 +21,9 @@ class RepositoryRegistry:
     def __init__(self, roots: dict[str, str], default: str | None) -> None:
         self._roots = roots
         self._default = default
-        self._repositories: dict[str, GraphMarkdownRepository] = {}
+        self._repositories: dict[str, LocalMarkdownRepository] = {}
 
-    def get(self, requested: Any) -> GraphMarkdownRepository:
+    def get(self, requested: Any) -> LocalMarkdownRepository:
         if requested is None:
             if self._default:
                 name = self._default
@@ -38,9 +38,7 @@ class RepositoryRegistry:
         if name not in self._roots:
             raise RepositoryError(f"Unknown repository '{name}'")
         if name not in self._repositories:
-            self._repositories[name] = GraphMarkdownRepository(
-                name, self._roots[name], GraphClient(OneDriveTokenProvider())
-            )
+            self._repositories[name] = LocalMarkdownRepository(name, self._roots[name])
         return self._repositories[name]
 
     def names(self) -> list[str]:
@@ -53,7 +51,7 @@ def registry() -> RepositoryRegistry:
     if not raw:
         raise RepositoryError(
             "MARKDOWN_REPOSITORIES is required, for example "
-            '{"vault":"Documents/ClaudeVault"}'
+            '{"vault":"/vault"}'
         )
     try:
         roots = json.loads(raw)
@@ -62,7 +60,7 @@ def registry() -> RepositoryRegistry:
     if not isinstance(roots, dict) or not roots or not all(
         isinstance(name, str) and isinstance(path, str) for name, path in roots.items()
     ):
-        raise RepositoryError("MARKDOWN_REPOSITORIES must map repository names to OneDrive paths")
+        raise RepositoryError("MARKDOWN_REPOSITORIES must map repository names to directories")
     default = os.getenv("MARKDOWN_DEFAULT_REPOSITORY")
     if default and default not in roots:
         raise RepositoryError("MARKDOWN_DEFAULT_REPOSITORY is not configured in MARKDOWN_REPOSITORIES")
@@ -77,7 +75,7 @@ def _message(message: str) -> ToolResult:
     return [TextContent(type="text", text=message)]
 
 
-def _repository(args: dict[str, Any]) -> GraphMarkdownRepository:
+def _repository(args: dict[str, Any]) -> LocalMarkdownRepository:
     return registry().get(args.get("repository"))
 
 

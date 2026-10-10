@@ -26,8 +26,7 @@ RUN uv sync --frozen --dev && uv run pytest -q && uv run pyright
 
 FROM python:3.11-slim AS runtime
 
-RUN addgroup --system app && adduser --system --ingroup app --home /app app \
-    && mkdir /state && chown app:app /state
+RUN addgroup --system app && adduser --system --ingroup app --home /app app
 
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
@@ -35,5 +34,4 @@ COPY --from=builder --chown=app:app /app/src /app/src
 
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
 USER app
-VOLUME ["/state"]
 ENTRYPOINT ["mcp-markdown-repositories"]

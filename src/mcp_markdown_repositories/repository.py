@@ -1,27 +1,20 @@
-"""OneDrive-backed Markdown repository.
+"""Local Markdown repository.
 
 The module deliberately knows nothing about MCP.  It exposes a small file
-repository API; Microsoft Graph is only its infrastructure adapter.
+repository API over a directory; where that directory comes from (a bind
+mount, a synchronised copy) is not its concern.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
-import json
 import os
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import re
-import time
 from typing import Any
-from urllib.parse import quote
-
-import requests
 
 
-GRAPH_ROOT = "https://graph.microsoft.com/v1.0"
-LOGIN_ROOT = "https://login.microsoftonline.com"
 TAG_PATTERN = re.compile(r"(?<![\w/])#([\w/-]+)")
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 
@@ -35,7 +28,7 @@ class RepositoryNotFoundError(RepositoryError):
 
 
 class RepositoryConflictError(RepositoryError):
-    """The remote file changed while it was being edited."""
+    """The file changed on disk while it was being edited."""
 
 
 class RepositoryPathError(RepositoryError):
@@ -56,168 +49,70 @@ class FileContent:
     etag: str | None
 
 
-class OneDriveTokenProvider:
-    """Obtains an access token from a static token or a renewable token file."""
+class LocalMarkdownRepository:
+    """A Markdown-only repository rooted at one local directory."""
 
-    def __init__(self) -> None:
-        self._access_token = os.getenv("ONEDRIVE_ACCESS_TOKEN")
-        self._refresh_token = os.getenv("ONEDRIVE_REFRESH_TOKEN")
-        self._refresh_token_file = os.getenv("ONEDRIVE_REFRESH_TOKEN_FILE")
-        self._client_id = os.getenv("ONEDRIVE_CLIENT_ID")
-        self._client_secret = os.getenv("ONEDRIVE_CLIENT_SECRET")
-        self._tenant_id = os.getenv("ONEDRIVE_TENANT_ID", "consumers")
-        self._expires_at = 0.0
-
-        if self._refresh_token_file and not self._refresh_token:
-            try:
-                self._refresh_token = open(self._refresh_token_file, encoding="utf-8").read().strip()
-            except OSError as error:
-                raise RepositoryError(
-                    f"Cannot read ONEDRIVE_REFRESH_TOKEN_FILE: {error}"
-                ) from error
-
-    def access_token(self) -> str:
-        if self._access_token and not self._refresh_token:
-            return self._access_token
-        if self._access_token and time.monotonic() < self._expires_at - 60:
-            return self._access_token
-        if not self._refresh_token or not self._client_id:
-            raise RepositoryError(
-                "Configure ONEDRIVE_ACCESS_TOKEN, or ONEDRIVE_CLIENT_ID with "
-                "ONEDRIVE_REFRESH_TOKEN(_FILE)."
-            )
-
-        response = requests.post(
-            f"{LOGIN_ROOT}/{self._tenant_id}/oauth2/v2.0/token",
-            data={
-                "client_id": self._client_id,
-                "client_secret": self._client_secret,
-                "grant_type": "refresh_token",
-                "refresh_token": self._refresh_token,
-                "scope": "offline_access Files.ReadWrite",
-            },
-            timeout=(3, 20),
-        )
-        if not response.ok:
-            raise RepositoryError(f"OneDrive token refresh failed: {response.status_code}")
-        payload = response.json()
-        token = payload.get("access_token")
-        if not isinstance(token, str):
-            raise RepositoryError("OneDrive token refresh returned no access token")
-        self._access_token = token
-        self._expires_at = time.monotonic() + int(payload.get("expires_in", 3600))
-        rotated = payload.get("refresh_token")
-        if isinstance(rotated, str) and rotated:
-            self._refresh_token = rotated
-            self._persist_refresh_token(rotated)
-        return token
-
-    def _persist_refresh_token(self, token: str) -> None:
-        if not self._refresh_token_file:
-            return
-        destination = PurePosixPath(self._refresh_token_file)
-        temporary = destination.with_name(f".{destination.name}.tmp")
-        try:
-            with open(temporary, "w", encoding="utf-8") as stream:
-                stream.write(token)
-                stream.write("\n")
-            os.chmod(temporary, 0o600)
-            os.replace(temporary, destination)
-        except OSError as error:
-            raise RepositoryError(f"Cannot persist rotated OneDrive refresh token: {error}") from error
-
-
-class GraphClient:
-    def __init__(self, token_provider: OneDriveTokenProvider) -> None:
-        self._tokens = token_provider
-
-    def request(
-        self,
-        method: str,
-        path: str,
-        *,
-        params: dict[str, str] | None = None,
-        content: bytes | None = None,
-        headers: dict[str, str] | None = None,
-    ) -> requests.Response:
-        request_headers = {"Authorization": f"Bearer {self._tokens.access_token()}"}
-        if headers:
-            request_headers.update(headers)
-        response = requests.request(
-            method,
-            f"{GRAPH_ROOT}{path}",
-            params=params,
-            data=content,
-            headers=request_headers,
-            timeout=(3, 30),
-        )
-        if response.status_code == 404:
-            raise RepositoryNotFoundError("Repository path not found")
-        if response.status_code == 412:
-            raise RepositoryConflictError("File changed on OneDrive; read it again before retrying")
-        if not response.ok:
-            message = _graph_error_message(response)
-            raise RepositoryError(f"OneDrive request failed ({response.status_code}): {message}")
-        return response
-
-
-class GraphMarkdownRepository:
-    """A Markdown-only repository rooted at one configured OneDrive directory."""
-
-    def __init__(self, name: str, root: str, client: GraphClient) -> None:
+    def __init__(self, name: str, root: str | Path) -> None:
         self.name = name
-        self._root = _normalise_root(root)
-        self._client = client
-        self._root_id: str | None = None
+        self._root = Path(root).resolve()
+        if not self._root.is_dir():
+            raise RepositoryPathError(f"Repository root '{root}' is not a directory")
 
     def list_directory(self, path: str = "") -> list[FileEntry]:
-        item = self._item(path)
-        if "folder" not in item:
-            raise RepositoryPathError(f"'{path}' is not a directory")
-        entries = []
-        for child in self._children(item["id"]):
-            is_directory = "folder" in child
-            if is_directory or _is_markdown(str(child.get("name", ""))):
-                entries.append(_entry(path, child, is_directory))
+        directory = self._resolve(_normalise_path(path))
+        if not directory.is_dir():
+            raise RepositoryNotFoundError(f"'{path}' is not a directory")
+        entries = [
+            self._entry(child)
+            for child in directory.iterdir()
+            if not _is_hidden(child.name) and child.exists() and (child.is_dir() or _is_markdown(child.name))
+        ]
         return sorted(entries, key=lambda entry: (not entry.is_directory, entry.path.casefold()))
 
     def list_files(self) -> list[FileEntry]:
-        root = self._item("")
         result: list[FileEntry] = []
-        pending: list[tuple[str, str]] = [("", root["id"])]
-        while pending:
-            parent_path, parent_id = pending.pop()
-            for child in self._children(parent_id):
-                name = str(child.get("name", ""))
-                path = _join_path(parent_path, name)
-                if "folder" in child:
-                    result.append(_entry(parent_path, child, True))
-                    pending.append((path, child["id"]))
-                elif _is_markdown(name):
-                    result.append(_entry(parent_path, child, False))
+        for directory, subdirectories, files in os.walk(self._root):
+            # Pruning in place keeps .obsidian, .trash and .git out of the walk.
+            subdirectories[:] = [name for name in subdirectories if not _is_hidden(name)]
+            parent = Path(directory)
+            result.extend(self._entry(parent / name) for name in subdirectories if (parent / name).exists())
+            result.extend(
+                self._entry(parent / name)
+                for name in files
+                if _is_markdown(name) and not _is_hidden(name) and (parent / name).exists()
+            )
         return sorted(result, key=lambda entry: entry.path.casefold())
 
     def read(self, path: str) -> FileContent:
-        path = _markdown_path(path)
-        item = self._item(path)
-        response = self._client.request("GET", f"/me/drive/items/{item['id']}/content")
-        return FileContent(
-            content=response.content.decode("utf-8"),
-            etag=response.headers.get("ETag") or item.get("eTag"),
-        )
+        target = self._resolve(_markdown_path(path))
+        try:
+            data = target.read_bytes()
+            stat = target.stat()
+        except FileNotFoundError as error:
+            raise RepositoryNotFoundError("Repository path not found") from error
+        except (IsADirectoryError, UnicodeDecodeError, OSError) as error:
+            raise RepositoryError(f"Cannot read '{path}': {error}") from error
+        return FileContent(content=data.decode("utf-8"), etag=_etag(stat))
 
     def write(self, path: str, content: str, etag: str | None = None) -> None:
-        path = _markdown_path(path)
-        self._ensure_parent_directories(path)
-        headers = {"Content-Type": "text/markdown; charset=utf-8"}
-        if etag:
-            headers["If-Match"] = etag
-        self._client.request(
-            "PUT",
-            f"/me/drive/root:/{self._encoded_full_path(path)}:/content",
-            content=content.encode("utf-8"),
-            headers=headers,
-        )
+        target = self._resolve(_markdown_path(path))
+        if etag is not None:
+            current = self._current_etag(target)
+            if current != etag:
+                raise RepositoryConflictError("File changed on disk; read it again before retrying")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # A sibling temporary file then rename: a synchroniser watching the
+        # directory never uploads a half-written note.
+        temporary = target.with_name(f".{target.name}.tmp")
+        try:
+            with open(temporary, "wb") as stream:
+                stream.write(content.encode("utf-8"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+        except OSError as error:
+            temporary.unlink(missing_ok=True)
+            raise RepositoryError(f"Cannot write '{path}': {error}") from error
 
     def append(self, path: str, content: str) -> None:
         try:
@@ -228,8 +123,13 @@ class GraphMarkdownRepository:
         self.write(path, current.content + content, current.etag)
 
     def delete(self, path: str) -> None:
-        item = self._item(_markdown_path(path))
-        self._client.request("DELETE", f"/me/drive/items/{item['id']}")
+        target = self._resolve(_markdown_path(path))
+        try:
+            target.unlink()
+        except FileNotFoundError as error:
+            raise RepositoryNotFoundError("Repository path not found") from error
+        except OSError as error:
+            raise RepositoryError(f"Cannot delete '{path}': {error}") from error
 
     def search(self, query: str, context_length: int = 100) -> list[dict[str, Any]]:
         if not query:
@@ -239,17 +139,17 @@ class GraphMarkdownRepository:
         for entry in self.list_files():
             if entry.is_directory:
                 continue
-            file = self.read(entry.path)
+            content = self.read(entry.path).content
+            folded = content.casefold()
             matches = []
             start = 0
-            folded = file.content.casefold()
             while True:
                 index = folded.find(needle, start)
                 if index < 0:
                     break
                 matches.append(
                     {
-                        "context": file.content[max(0, index - context_length): index + len(query) + context_length],
+                        "context": content[max(0, index - context_length): index + len(query) + context_length],
                         "match_position": {"start": index, "end": index + len(query)},
                     }
                 )
@@ -265,10 +165,11 @@ class GraphMarkdownRepository:
         directory = _normalise_path(directory or "")
         matches = []
         for entry in self.list_files():
+            if entry.is_directory:
+                continue
             if directory and not entry.path.startswith(f"{directory}/"):
                 continue
-            content = self.read(entry.path).content
-            if expected in _tags(content):
+            if expected in _tags(self.read(entry.path).content):
                 matches.append(entry.path)
         return matches
 
@@ -282,68 +183,37 @@ class GraphMarkdownRepository:
 
     def recent_changes(self, limit: int, days: int) -> list[dict[str, Any]]:
         cutoff = datetime.now(UTC).timestamp() - days * 24 * 60 * 60
-        recent = []
-        for entry in self.list_files():
-            if entry.is_directory or not entry.modified_at:
-                continue
-            try:
-                modified = datetime.fromisoformat(entry.modified_at.replace("Z", "+00:00")).timestamp()
-            except ValueError:
-                continue
-            if modified >= cutoff:
-                recent.append({"filename": entry.path, "modified_at": entry.modified_at, "size": entry.size})
+        recent = [
+            {"filename": entry.path, "modified_at": entry.modified_at, "size": entry.size}
+            for entry in self.list_files()
+            if not entry.is_directory
+            and entry.modified_at
+            and datetime.fromisoformat(entry.modified_at).timestamp() >= cutoff
+        ]
         return sorted(recent, key=lambda item: item["modified_at"], reverse=True)[:limit]
 
-    def _item(self, path: str) -> dict[str, Any]:
-        path = _normalise_path(path)
-        if not path:
-            return self._root_item()
-        response = self._client.request("GET", f"/me/drive/root:/{self._encoded_full_path(path)}")
-        return response.json()
+    def _resolve(self, path: str) -> Path:
+        target = (self._root / path).resolve() if path else self._root
+        # resolve() follows symlinks, so a link pointing outside is caught here
+        # and not only a literal '..'.
+        if not target.is_relative_to(self._root):
+            raise RepositoryPathError("Path must stay within its configured repository")
+        return target
 
-    def _root_item(self) -> dict[str, Any]:
-        if self._root_id:
-            return {"id": self._root_id, "folder": {}}
-        response = self._client.request("GET", f"/me/drive/root:/{self._encoded_full_path('')}")
-        item = response.json()
-        if "folder" not in item:
-            raise RepositoryPathError("Configured OneDrive repository root is not a directory")
-        self._root_id = item["id"]
-        return item
+    def _current_etag(self, target: Path) -> str | None:
+        try:
+            return _etag(target.stat())
+        except FileNotFoundError:
+            return None
 
-    def _children(self, item_id: str) -> Iterator[dict[str, Any]]:
-        path = f"/me/drive/items/{item_id}/children"
-        params: dict[str, str] | None = {"$select": "id,name,folder,file,size,lastModifiedDateTime,eTag"}
-        while path:
-            response = self._client.request("GET", path, params=params)
-            payload = response.json()
-            yield from payload.get("value", [])
-            next_link = payload.get("@odata.nextLink")
-            path = next_link.removeprefix(GRAPH_ROOT) if isinstance(next_link, str) else ""
-            params = None
-
-    def _ensure_parent_directories(self, path: str) -> None:
-        parts = path.split("/")[:-1]
-        current_id = self._root_item()["id"]
-        for part in parts:
-            child = next((item for item in self._children(current_id) if item.get("name") == part), None)
-            if child is None:
-                response = self._client.request(
-                    "POST",
-                    f"/me/drive/items/{current_id}/children",
-                    content=json.dumps({"name": part, "folder": {}, "@microsoft.graph.conflictBehavior": "fail"}).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                )
-                child = response.json()
-            if "folder" not in child:
-                raise RepositoryPathError(f"'{part}' is a file, not a directory")
-            current_id = child["id"]
-
-    def _full_path(self, path: str) -> str:
-        return _join_path(self._root, path) if path else self._root
-
-    def _encoded_full_path(self, path: str) -> str:
-        return quote(self._full_path(path), safe="/")
+    def _entry(self, path: Path) -> FileEntry:
+        stat = path.stat()
+        return FileEntry(
+            path=path.relative_to(self._root).as_posix(),
+            is_directory=path.is_dir(),
+            modified_at=datetime.fromtimestamp(stat.st_mtime, UTC).isoformat(),
+            size=None if path.is_dir() else stat.st_size,
+        )
 
 
 def patch_markdown(source: str, operation: str, target_type: str, target: str, content: str) -> str:
@@ -470,26 +340,20 @@ def _tags(content: str) -> set[str]:
     return tags
 
 
-def _entry(parent: str, item: dict[str, Any], is_directory: bool) -> FileEntry:
-    return FileEntry(
-        path=_join_path(parent, str(item["name"])),
-        is_directory=is_directory,
-        modified_at=item.get("lastModifiedDateTime"),
-        size=item.get("size"),
-    )
+def _etag(stat: os.stat_result) -> str:
+    return f"{stat.st_mtime_ns}-{stat.st_size}"
 
 
-def _normalise_root(path: str) -> str:
-    path = _normalise_path(path)
-    if not path:
-        raise RepositoryPathError("A OneDrive repository root must be configured")
-    return path
+def _is_hidden(name: str) -> bool:
+    return name.startswith(".")
 
 
 def _normalise_path(path: str) -> str:
     candidate = PurePosixPath(path)
     if candidate.is_absolute() or ".." in candidate.parts:
         raise RepositoryPathError("Path must stay within its configured repository")
+    if any(_is_hidden(part) for part in candidate.parts):
+        raise RepositoryPathError("Hidden files and directories are not exposed")
     normalised = str(candidate)
     return "" if normalised == "." else normalised.strip("/")
 
@@ -503,18 +367,3 @@ def _markdown_path(path: str) -> str:
 
 def _is_markdown(path: str) -> bool:
     return path.casefold().endswith(".md")
-
-
-def _join_path(*parts: str) -> str:
-    return "/".join(part.strip("/") for part in parts if part.strip("/"))
-
-
-def _graph_error_message(response: requests.Response) -> str:
-    try:
-        payload = response.json()
-        error = payload.get("error", {})
-        if isinstance(error, dict) and isinstance(error.get("message"), str):
-            return error["message"]
-    except ValueError:
-        pass
-    return "unexpected response"
