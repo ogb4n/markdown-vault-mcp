@@ -7,13 +7,20 @@ mount, a synchronised copy) is not its concern.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import os
 from pathlib import Path, PurePosixPath
 import re
+import threading
 from typing import Any
 
+
+# Reading a note can mean a download from a cloud mount (about half a second each, cold): a search
+# reads them side by side. Plain disk reads gain nothing and lose little.
+READ_WORKERS = 16
 
 TAG_PATTERN = re.compile(r"(?<![\w/])#([\w/-]+)")
 HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
@@ -55,6 +62,8 @@ class LocalMarkdownRepository:
     def __init__(self, name: str, root: str | Path) -> None:
         self.name = name
         self._root = Path(root).resolve()
+        # Tools run on worker threads: read-modify-write operations on a note must not interleave.
+        self._write_lock = threading.RLock()
         if not self._root.is_dir():
             raise RepositoryPathError(f"Repository root '{root}' is not a directory")
 
@@ -95,6 +104,10 @@ class LocalMarkdownRepository:
         return FileContent(content=data.decode("utf-8"), etag=_etag(stat))
 
     def write(self, path: str, content: str, etag: str | None = None) -> None:
+        with self._write_lock:
+            self._write(path, content, etag)
+
+    def _write(self, path: str, content: str, etag: str | None) -> None:
         target = self._resolve(_markdown_path(path))
         if etag is not None:
             current = self._current_etag(target)
@@ -115,47 +128,59 @@ class LocalMarkdownRepository:
             raise RepositoryError(f"Cannot write '{path}': {error}") from error
 
     def append(self, path: str, content: str) -> None:
-        try:
-            current = self.read(path)
-        except RepositoryNotFoundError:
-            self.write(path, content)
-            return
-        self.write(path, current.content + content, current.etag)
+        with self._write_lock:
+            try:
+                current = self.read(path)
+            except RepositoryNotFoundError:
+                self.write(path, content)
+                return
+            self.write(path, current.content + content, current.etag)
 
     def delete(self, path: str) -> None:
-        target = self._resolve(_markdown_path(path))
-        try:
-            target.unlink()
-        except FileNotFoundError as error:
-            raise RepositoryNotFoundError("Repository path not found") from error
-        except OSError as error:
-            raise RepositoryError(f"Cannot delete '{path}': {error}") from error
+        with self._write_lock:
+            target = self._resolve(_markdown_path(path))
+            try:
+                target.unlink()
+            except FileNotFoundError as error:
+                raise RepositoryNotFoundError("Repository path not found") from error
+            except OSError as error:
+                raise RepositoryError(f"Cannot delete '{path}': {error}") from error
 
-    def search(self, query: str, context_length: int = 100) -> list[dict[str, Any]]:
+    def _contents(self, entries: list[FileEntry]) -> Iterator[tuple[FileEntry, str]]:
+        """Each file with its text, in the order given; the reads overlap."""
+        pool = ThreadPoolExecutor(max_workers=READ_WORKERS)
+        try:
+            yield from zip(entries, pool.map(lambda entry: self.read(entry.path).content, entries))
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+
+    def search(self, query: str, context_length: int = 100, matches_per_file: int | None = None) -> list[dict[str, Any]]:
+        """Hits by descending count; `score` counts every match, `matches` keeps the first `matches_per_file`."""
         if not query:
             raise RepositoryError("Search query must not be empty")
         needle = query.casefold()
         results: list[dict[str, Any]] = []
-        for entry in self.list_files():
-            if entry.is_directory:
-                continue
-            content = self.read(entry.path).content
+        files = [entry for entry in self.list_files() if not entry.is_directory]
+        for entry, content in self._contents(files):
             folded = content.casefold()
             matches = []
+            count = 0
             start = 0
             while True:
                 index = folded.find(needle, start)
                 if index < 0:
                     break
-                matches.append(
-                    {
-                        "context": content[max(0, index - context_length): index + len(query) + context_length],
-                        "match_position": {"start": index, "end": index + len(query)},
-                    }
-                )
+                count += 1
+                if matches_per_file is None or len(matches) < matches_per_file:
+                    matches.append(
+                        {
+                            "context": content[max(0, index - context_length): index + len(query) + context_length],
+                            "match_position": {"start": index, "end": index + len(query)},
+                        }
+                    )
                 start = index + max(1, len(query))
-            if matches:
-                results.append({"filename": entry.path, "score": len(matches), "matches": matches})
+            if count:
+                results.append({"filename": entry.path, "score": count, "matches": matches})
         return sorted(results, key=lambda result: (-result["score"], result["filename"].casefold()))
 
     def search_by_tag(self, tag: str, directory: str | None = None) -> list[str]:
@@ -163,23 +188,21 @@ class LocalMarkdownRepository:
         if not expected:
             raise RepositoryError("Tag must not be empty")
         directory = _normalise_path(directory or "")
-        matches = []
-        for entry in self.list_files():
-            if entry.is_directory:
-                continue
-            if directory and not entry.path.startswith(f"{directory}/"):
-                continue
-            if expected in _tags(self.read(entry.path).content):
-                matches.append(entry.path)
-        return matches
+        files = [
+            entry
+            for entry in self.list_files()
+            if not entry.is_directory and (not directory or entry.path.startswith(f"{directory}/"))
+        ]
+        return [entry.path for entry, content in self._contents(files) if expected in _tags(content)]
 
     def get_frontmatter(self, path: str) -> dict[str, Any]:
         return _frontmatter(self.read(path).content)
 
     def patch(self, path: str, operation: str, target_type: str, target: str, content: str) -> None:
-        current = self.read(path)
-        updated = patch_markdown(current.content, operation, target_type, target, content)
-        self.write(path, updated, current.etag)
+        with self._write_lock:
+            current = self.read(path)
+            updated = patch_markdown(current.content, operation, target_type, target, content)
+            self.write(path, updated, current.etag)
 
     def recent_changes(self, limit: int, days: int) -> list[dict[str, Any]]:
         cutoff = datetime.now(UTC).timestamp() - days * 24 * 60 * 60

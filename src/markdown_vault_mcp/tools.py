@@ -141,9 +141,20 @@ def get_files(args: dict[str, Any]) -> ToolResult:
     return _text({path: repository.read(path).content for path in paths})
 
 
+# A broad query on the whole vault once returned 312 KB, which the agent had to page through.
+SEARCH_FILE_LIMIT = 25
+SEARCH_MATCH_LIMIT = 5
+
+
 def search(args: dict[str, Any]) -> ToolResult:
     _require(args, "query")
-    return _text(_repository(args).search(args["query"], _integer(args, "context_length", 100, 0)))
+    limit = _integer(args, "limit", SEARCH_FILE_LIMIT)
+    per_file = _integer(args, "max_matches_per_file", SEARCH_MATCH_LIMIT)
+    hits = _repository(args).search(args["query"], _integer(args, "context_length", 100, 0), matches_per_file=per_file)
+    shown: list[Any] = hits[:limit]
+    if len(hits) > limit:
+        shown.append({"truncated": True, "omitted_files": len(hits) - limit, "hint": "raise limit or narrow the query"})
+    return _text(shown)
 
 
 def append(args: dict[str, Any]) -> ToolResult:
@@ -205,7 +216,7 @@ _DEFINITIONS = [
     _tool("markdown_list_directory", "List Markdown files and directories directly inside a repository path.", _with_repository({"path": _PATH}), [], list_directory),
     _tool("markdown_get_file", "Read a Markdown file.", _with_repository({"path": _PATH}), ["path"], get_file),
     _tool("markdown_get_files", "Read several Markdown files in one call.", _with_repository({"paths": {"type": "array", "items": _PATH}}), ["paths"], get_files),
-    _tool("markdown_search", "Search text across every Markdown file. Searches are case-insensitive.", _with_repository({"query": {"type": "string"}, "context_length": {"type": "integer", "default": 100}}), ["query"], search),
+    _tool("markdown_search", "Search text across every Markdown file. Searches are case-insensitive; `score` counts all matches in a file, `matches` keeps the first few.", _with_repository({"query": {"type": "string"}, "context_length": {"type": "integer", "default": 100}, "limit": {"type": "integer", "default": SEARCH_FILE_LIMIT, "description": "Most files returned, best first."}, "max_matches_per_file": {"type": "integer", "default": SEARCH_MATCH_LIMIT}}), ["query"], search),
     _tool("markdown_append", "Append Markdown content, creating the file when it does not exist.", _with_repository({"path": _PATH, "content": _CONTENT}), ["path", "content"], append),
     _tool("markdown_write", "Create or replace a Markdown file. This overwrites existing content.", _with_repository({"path": _PATH, "content": _CONTENT}), ["path", "content"], write),
     _tool("markdown_patch", "Patch a heading, block reference, or a top-level frontmatter field in a Markdown file.", _with_repository({"path": _PATH, "operation": {"type": "string", "enum": ["append", "prepend", "replace", "delete"]}, "target_type": {"type": "string", "enum": ["heading", "block", "frontmatter"]}, "target": {"type": "string"}, "content": _CONTENT}), ["path", "operation", "target_type", "target", "content"], patch),

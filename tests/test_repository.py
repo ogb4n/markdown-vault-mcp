@@ -129,3 +129,49 @@ def test_delete_removes_the_file_and_reports_a_missing_one(vault, tmp_path):
 def test_recent_changes_lists_files_by_modification_time(vault):
     names = [change["filename"] for change in vault.recent_changes(10, 1)]
     assert set(names) == {"Projects/note.md", "root.md"}
+
+
+def test_search_reads_files_side_by_side(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    for number in range(12):
+        (tmp_path / f"note-{number:02}.md").write_text(f"needle {number}\n", encoding="utf-8")
+    repository = LocalMarkdownRepository("vault", tmp_path)
+    original, lock, state = repository.read, threading.Lock(), {"active": 0, "peak": 0}
+
+    def slow_read(path):
+        with lock:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        time.sleep(0.05)
+        try:
+            return original(path)
+        finally:
+            with lock:
+                state["active"] -= 1
+
+    monkeypatch.setattr(repository, "read", slow_read)
+    hits = repository.search("needle")
+    assert state["peak"] > 1
+    assert [hit["filename"] for hit in hits] == [f"note-{number:02}.md" for number in range(12)]
+    assert repository.search_by_tag("absent") == []
+
+
+def test_search_keeps_the_real_count_but_few_matches(tmp_path):
+    (tmp_path / "many.md").write_text("ab " * 12, encoding="utf-8")
+    repository = LocalMarkdownRepository("vault", tmp_path)
+    [hit] = repository.search("ab", matches_per_file=3)
+    assert hit["score"] == 12 and len(hit["matches"]) == 3
+    [full] = repository.search("ab")
+    assert len(full["matches"]) == 12
+
+
+def test_concurrent_appends_do_not_lose_lines(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    repository = LocalMarkdownRepository("vault", tmp_path)
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        list(pool.map(lambda number: repository.append("log.md", f"line {number}\n"), range(60)))
+    lines = repository.read("log.md").content.splitlines()
+    assert sorted(lines) == sorted(f"line {number}" for number in range(60))

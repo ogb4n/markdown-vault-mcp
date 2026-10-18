@@ -32,8 +32,9 @@ class Repository:
     def list_directory(self, path):
         return []
 
-    def search(self, query, context_length):
-        return [{"filename": "note.md", "score": 1, "matches": []}]
+    def search(self, query, context_length, matches_per_file=None):
+        self.calls.append(("search", query, context_length, matches_per_file))
+        return [{"filename": f"note-{n}.md", "score": 1, "matches": []} for n in range(30)]
 
     def search_by_tag(self, tag, directory):
         return ["note.md"]
@@ -98,3 +99,16 @@ def test_patch_validates_required_arguments(repository):
         }
     )
     assert repository.calls == [("patch", "note.md", "append", "heading", "Log", "entry")]
+
+
+def test_search_is_capped_and_says_so(repository):
+    hits = json.loads(text(tools.search({"query": "x"})))
+    assert len(hits) == tools.SEARCH_FILE_LIMIT + 1
+    assert hits[-1] == {"truncated": True, "omitted_files": 5, "hint": "raise limit or narrow the query"}
+    assert repository.calls == [("search", "x", 100, tools.SEARCH_MATCH_LIMIT)]
+
+
+def test_search_limit_can_be_raised(repository):
+    hits = json.loads(text(tools.search({"query": "x", "limit": 30, "max_matches_per_file": 2})))
+    assert len(hits) == 30 and all("truncated" not in hit for hit in hits)
+    assert repository.calls == [("search", "x", 100, 2)]

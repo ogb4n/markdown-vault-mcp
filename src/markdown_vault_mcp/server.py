@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from collections.abc import Sequence
@@ -35,7 +36,9 @@ async def call_tool(name: str, arguments: Any) -> Sequence[TextContent | ImageCo
 
 
     try:
-        return tools.call_tool(name, arguments)
+        # Off the event loop: a tool reads files, and on a network mount one search can take minutes,
+        # during which a blocked loop answers nothing (not even /healthz or a ping).
+        return await asyncio.to_thread(tools.call_tool, name, arguments)
     except Exception as e:
         logger.error(str(e))
         raise RuntimeError(f"Caught Exception. Error: {str(e)}")
